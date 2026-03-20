@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elt-api
+  namespace: elt-pipeline
+  labels:
+    app: elt-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: elt-api
+  template:
+    metadata:
+      labels:
+        app: elt-api
+    spec:
+      containers:
+        - name: api
+          image: artifactory.company.com/elt-pipeline/api:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: minio-secret
+            - secretRef:
+                name: oracle-secret
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health/detailed
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elt-api-service
+  namespace: elt-pipeline
+spec:
+  selector:
+    app: elt-api
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: elt-api-hpa
+  namespace: elt-pipeline
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: elt-api
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

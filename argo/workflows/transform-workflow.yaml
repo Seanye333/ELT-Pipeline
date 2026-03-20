@@ -1,0 +1,51 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: elt-transform-workflow
+  namespace: elt-pipeline
+spec:
+  serviceAccountName: elt-pipeline-sa
+  entrypoint: transform-pipeline
+  arguments:
+    parameters:
+      - name: run-date
+        value: ""
+      - name: image-tag
+        value: "latest"
+      - name: target-table
+        value: "ELT_DATA"
+
+  templates:
+    - name: transform-pipeline
+      steps:
+        - - name: transform-and-load
+            template: run-python-module
+            arguments:
+              parameters:
+                - name: module
+                  value: "src.load.oracle_loader"
+                - name: args
+                  value: "--run-date {{workflow.parameters.run-date}} --table {{workflow.parameters.target-table}}"
+
+    - name: run-python-module
+      inputs:
+        parameters:
+          - name: module
+          - name: args
+            value: ""
+      container:
+        image: "artifactory.company.com/elt-pipeline/pipeline-runner:{{workflow.parameters.image-tag}}"
+        command: [python, -m]
+        args: ["{{inputs.parameters.module}}", "{{inputs.parameters.args}}"]
+        envFrom:
+          - secretRef:
+              name: minio-secret
+          - secretRef:
+              name: oracle-secret
+        resources:
+          requests:
+            cpu: "1"
+            memory: "1Gi"
+          limits:
+            cpu: "4"
+            memory: "4Gi"

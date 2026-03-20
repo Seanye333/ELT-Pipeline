@@ -1,0 +1,57 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: elt-extract-workflow
+  namespace: elt-pipeline
+spec:
+  serviceAccountName: elt-pipeline-sa
+  entrypoint: extract-pipeline
+  arguments:
+    parameters:
+      - name: run-date
+        value: ""
+      - name: image-tag
+        value: "latest"
+
+  templates:
+    - name: extract-pipeline
+      steps:
+        - - name: scan-onedrive
+            template: run-python-module
+            arguments:
+              parameters:
+                - name: module
+                  value: "src.extract.onedrive_scanner"
+                - name: args
+                  value: "--scan-only"
+        - - name: download-and-upload
+            template: run-python-module
+            arguments:
+              parameters:
+                - name: module
+                  value: "src.extract.file_downloader"
+                - name: args
+                  value: "--run-date {{workflow.parameters.run-date}}"
+
+    - name: run-python-module
+      inputs:
+        parameters:
+          - name: module
+          - name: args
+            value: ""
+      container:
+        image: "artifactory.company.com/elt-pipeline/pipeline-runner:{{workflow.parameters.image-tag}}"
+        command: [python, -m]
+        args: ["{{inputs.parameters.module}}", "{{inputs.parameters.args}}"]
+        envFrom:
+          - secretRef:
+              name: graph-api-secret
+          - secretRef:
+              name: minio-secret
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"

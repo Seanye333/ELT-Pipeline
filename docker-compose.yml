@@ -1,0 +1,209 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ELT Pipeline — Local Development Stack
+#
+# Services:
+#   postgres      → Airflow metadata DB
+#   redis         → Celery broker
+#   airflow-init  → DB init + first-user creation (runs once)
+#   airflow-web   → Airflow Webserver  http://localhost:8080
+#   airflow-sched → Airflow Scheduler
+#   airflow-work  → Airflow Celery Worker
+#   minio         → MinIO Object Storage  http://localhost:9001 (console)
+#   oracle        → Oracle XE 21c (dev only)
+#   api           → FastAPI              http://localhost:8000/docs
+#   dashboard     → Streamlit            http://localhost:8501
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow/Dockerfile
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-local-dev-secret}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    # Inject pipeline env vars so DAG code can read settings
+    GRAPH_TENANT_ID: ${GRAPH_TENANT_ID:-}
+    GRAPH_CLIENT_ID: ${GRAPH_CLIENT_ID:-}
+    GRAPH_CLIENT_SECRET: ${GRAPH_CLIENT_SECRET:-}
+    GRAPH_ONEDRIVE_USER_ID: ${GRAPH_ONEDRIVE_USER_ID:-}
+    ONEDRIVE_FOLDER_PATH: ${ONEDRIVE_FOLDER_PATH:-/Reports}
+    MINIO_ENDPOINT: minio:9000
+    MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+    MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    MINIO_SECURE: "false"
+    ORACLE_HOST: oracle
+    ORACLE_PORT: 1521
+    ORACLE_SERVICE_NAME: XEPDB1
+    ORACLE_USER: ${ORACLE_USER:-elt_user}
+    ORACLE_PASSWORD: ${ORACLE_PASSWORD:-elt_password}
+    ORACLE_SCHEMA: ELT_PIPELINE
+    PYTHONPATH: /opt/airflow
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./src:/opt/airflow/src
+    - airflow-logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+
+  # ── Infrastructure ────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      retries: 3
+    restart: unless-stopped
+
+  oracle:
+    image: gvenzl/oracle-xe:21-slim-faststart
+    ports:
+      - "1521:1521"
+    environment:
+      ORACLE_PASSWORD: ${ORACLE_SYS_PASSWORD:-oracle}
+      APP_USER: ${ORACLE_USER:-elt_user}
+      APP_USER_PASSWORD: ${ORACLE_PASSWORD:-elt_password}
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'SELECT 1 FROM DUAL;' | sqlplus -s elt_user/elt_password@//localhost/XEPDB1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Airflow ───────────────────────────────────────────────────────────────
+
+  airflow-init:
+    <<: *airflow-common
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create
+          --username admin
+          --firstname Admin
+          --lastname User
+          --role Admin
+          --email admin@example.com
+          --password admin
+      "
+    restart: "no"
+
+  airflow-web:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-sched:
+    <<: *airflow-common
+    command: scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-work:
+    <<: *airflow-common
+    command: celery worker
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ── Application ───────────────────────────────────────────────────────────
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      ORACLE_HOST: oracle
+      MINIO_ENDPOINT: minio:9000
+      API_DEBUG: "true"
+    volumes:
+      - ./src:/app/src
+      - ./api:/app/api
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      oracle:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard/Dockerfile
+    ports:
+      - "8501:8501"
+    env_file: .env
+    environment:
+      STREAMLIT_API_BASE_URL: http://api:8000
+    volumes:
+      - ./dashboard:/app/dashboard
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  minio-data:
+  oracle-data:
+  airflow-logs:

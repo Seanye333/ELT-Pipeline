@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: elt-pipeline
+  labels:
+    app.kubernetes.io/name: elt-pipeline
+    app.kubernetes.io/managed-by: jenkins

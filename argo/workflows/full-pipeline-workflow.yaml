@@ -1,0 +1,78 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: elt-full-pipeline
+  namespace: elt-pipeline
+spec:
+  serviceAccountName: elt-pipeline-sa
+  entrypoint: full-pipeline
+  arguments:
+    parameters:
+      - name: run-date
+        value: ""
+      - name: image-tag
+        value: "latest"
+
+  templates:
+    - name: full-pipeline
+      steps:
+        - - name: extract-to-minio
+            templateRef:
+              name: elt-extract-workflow
+              template: extract-pipeline
+            arguments:
+              parameters:
+                - name: run-date
+                  value: "{{workflow.parameters.run-date}}"
+                - name: image-tag
+                  value: "{{workflow.parameters.image-tag}}"
+        - - name: transform-to-oracle
+            templateRef:
+              name: elt-transform-workflow
+              template: transform-pipeline
+            arguments:
+              parameters:
+                - name: run-date
+                  value: "{{workflow.parameters.run-date}}"
+                - name: image-tag
+                  value: "{{workflow.parameters.image-tag}}"
+        - - name: health-check
+            template: pipeline-health-check
+            arguments:
+              parameters:
+                - name: run-date
+                  value: "{{workflow.parameters.run-date}}"
+
+    - name: pipeline-health-check
+      inputs:
+        parameters:
+          - name: run-date
+      container:
+        image: "artifactory.company.com/elt-pipeline/pipeline-runner:{{workflow.parameters.image-tag}}"
+        command: [python, scripts/smoke_test.py]
+        args: ["--run-date", "{{inputs.parameters.run-date}}"]
+        envFrom:
+          - secretRef:
+              name: oracle-secret
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+---
+# CronWorkflow: run full pipeline on weekdays at 05:00 UTC
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: elt-pipeline-cron
+  namespace: elt-pipeline
+spec:
+  schedule: "0 5 * * 1-5"
+  timezone: "UTC"
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    workflowTemplateRef:
+      name: elt-full-pipeline
+    arguments:
+      parameters:
+        - name: image-tag
+          value: "latest"

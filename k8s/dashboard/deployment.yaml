@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elt-dashboard
+  namespace: elt-pipeline
+  labels:
+    app: elt-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elt-dashboard
+  template:
+    metadata:
+      labels:
+        app: elt-dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: artifactory.company.com/elt-pipeline/dashboard:latest
+          ports:
+            - containerPort: 8501
+          env:
+            - name: STREAMLIT_API_BASE_URL
+              value: "http://elt-api-service.elt-pipeline.svc.cluster.local:8000"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elt-dashboard-service
+  namespace: elt-pipeline
+spec:
+  selector:
+    app: elt-dashboard
+  ports:
+    - protocol: TCP
+      port: 8501
+      targetPort: 8501
+  type: ClusterIP
+  sessionAffinity: ClientIP   # Sticky sessions for Streamlit
